@@ -35,6 +35,37 @@ const policies = require("./policies");
 const { checkPortAvailable } = require("./preflight");
 const EXPERIMENTAL = process.env.NEMOCLAW_EXPERIMENTAL === "1";
 
+// ── Onboard lock ─────────────────────────────────────────────────
+// Prevent two terminals from running `nemoclaw onboard` simultaneously,
+// which can create duplicate sandboxes. From OpenClaw 1890089f49.
+const LOCKFILE = path.join(process.env.HOME || "/tmp", ".nemoclaw", ".onboard.lock");
+
+function acquireOnboardLock() {
+  try {
+    fs.mkdirSync(path.dirname(LOCKFILE), { recursive: true });
+    fs.writeFileSync(LOCKFILE, String(process.pid), { flag: "wx" });
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST") {
+      // Check if holding PID is still alive
+      try {
+        const pid = parseInt(fs.readFileSync(LOCKFILE, "utf-8"), 10);
+        process.kill(pid, 0); // throws if process not running
+        return false;
+      } catch {
+        // Stale lock — owner is dead, reclaim
+        try { fs.unlinkSync(LOCKFILE); } catch {}
+        return acquireOnboardLock();
+      }
+    }
+    return false;
+  }
+}
+
+function releaseOnboardLock() {
+  try { fs.unlinkSync(LOCKFILE); } catch {}
+}
+
 // Non-interactive mode: set by --non-interactive flag or env var.
 // When active, all prompts use env var overrides or sensible defaults.
 let NON_INTERACTIVE = false;
@@ -208,10 +239,15 @@ function sleep(seconds) {
 }
 
 function waitForSandboxReady(sandboxName, attempts = 10, delaySeconds = 2) {
+  // Exponential backoff starting at delaySeconds, cap at 15s.
+  // From OpenClaw 44304ba24a — avoids tight-loop polling.
+  let delay = delaySeconds;
+  const maxDelay = 15;
   for (let i = 0; i < attempts; i += 1) {
     const exists = runCapture(`openshell sandbox get "${sandboxName}" 2>/dev/null`, { ignoreError: true });
     if (exists) return true;
-    sleep(delaySeconds);
+    sleep(delay);
+    delay = Math.min(delay * 2, maxDelay);
   }
   return false;
 }
@@ -323,15 +359,26 @@ async function preflight() {
     console.log(`  ✓ Port ${port} available (${label})`);
   }
 
-  // GPU
-  const gpu = nim.detectGpu();
-  if (gpu && gpu.type === "nvidia") {
-    console.log(`  ✓ NVIDIA GPU detected: ${gpu.count} GPU(s), ${gpu.totalMemoryMB} MB VRAM`);
-  } else if (gpu && gpu.type === "apple") {
-    console.log(`  ✓ Apple GPU detected: ${gpu.name}${gpu.cores ? ` (${gpu.cores} cores)` : ""}, ${gpu.totalMemoryMB} MB unified memory`);
-    console.log("  ⓘ NIM requires NVIDIA GPU — will use cloud inference");
+  // GPU — skip expensive nvidia-smi/system_profiler when cloud is pre-selected
+  // in non-interactive mode (saves 1-2s). From OpenClaw e6c6aaa11b.
+  const requestedProvider = isNonInteractive()
+    ? (process.env.NEMOCLAW_PROVIDER || "").trim().toLowerCase()
+    : null;
+  const skipGpuDetection = requestedProvider === "cloud";
+
+  let gpu = null;
+  if (!skipGpuDetection) {
+    gpu = nim.detectGpu();
+    if (gpu && gpu.type === "nvidia") {
+      console.log(`  ✓ NVIDIA GPU detected: ${gpu.count} GPU(s), ${gpu.totalMemoryMB} MB VRAM`);
+    } else if (gpu && gpu.type === "apple") {
+      console.log(`  ✓ Apple GPU detected: ${gpu.name}${gpu.cores ? ` (${gpu.cores} cores)` : ""}, ${gpu.totalMemoryMB} MB unified memory`);
+      console.log("  ⓘ NIM requires NVIDIA GPU — will use cloud inference");
+    } else {
+      console.log("  ⓘ No GPU detected — will use cloud inference");
+    }
   } else {
-    console.log("  ⓘ No GPU detected — will use cloud inference");
+    console.log("  ⓘ GPU detection skipped (cloud provider pre-selected)");
   }
 
   return gpu;
@@ -882,19 +929,30 @@ function printDashboard(sandboxName, model, provider) {
 async function onboard(opts = {}) {
   NON_INTERACTIVE = opts.nonInteractive || process.env.NEMOCLAW_NON_INTERACTIVE === "1";
 
-  console.log("");
-  console.log("  NemoClaw Onboarding");
-  if (isNonInteractive()) console.log("  (non-interactive mode)");
-  console.log("  ===================");
+  // Prevent concurrent onboarding
+  if (!acquireOnboardLock()) {
+    console.error("  Another onboarding process is already running.");
+    console.error("  If this is stale, remove ~/.nemoclaw/.onboard.lock and try again.");
+    process.exit(1);
+  }
 
-  const gpu = await preflight();
-  await startGateway(gpu);
-  const sandboxName = await createSandbox(gpu);
-  const { model, provider } = await setupNim(sandboxName, gpu);
-  await setupInference(sandboxName, model, provider);
-  await setupOpenclaw(sandboxName, model, provider);
-  await setupPolicies(sandboxName);
-  printDashboard(sandboxName, model, provider);
+  try {
+    console.log("");
+    console.log("  NemoClaw Onboarding");
+    if (isNonInteractive()) console.log("  (non-interactive mode)");
+    console.log("  ===================");
+
+    const gpu = await preflight();
+    await startGateway(gpu);
+    const sandboxName = await createSandbox(gpu);
+    const { model, provider } = await setupNim(sandboxName, gpu);
+    await setupInference(sandboxName, model, provider);
+    await setupOpenclaw(sandboxName, model, provider);
+    await setupPolicies(sandboxName);
+    printDashboard(sandboxName, model, provider);
+  } finally {
+    releaseOnboardLock();
+  }
 }
 
 module.exports = { buildSandboxConfigSyncScript, onboard, setupNim };

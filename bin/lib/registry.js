@@ -8,6 +8,12 @@ const path = require("path");
 
 const GLOBAL_REGISTRY_FILE = path.join(process.env.HOME || "/tmp", ".nemoclaw", "sandboxes.json");
 
+// Normalize sandbox names to lowercase for case-insensitive lookups.
+// Prevents "MyBox" vs "mybox" mismatches. From OpenClaw a290f5e50f.
+function normalizeName(name) {
+  return name ? name.toLowerCase() : name;
+}
+
 /**
  * Resolve the registry file path. If tenantId is provided, uses
  * ~/.nemoclaw/tenants/{tenantId}/sandboxes.json for tenant isolation.
@@ -39,7 +45,7 @@ function save(data, tenantId) {
 
 function getSandbox(name, tenantId) {
   const data = load(tenantId);
-  return data.sandboxes[name] || null;
+  return data.sandboxes[normalizeName(name)] || null;
 }
 
 function getDefault(tenantId) {
@@ -54,8 +60,9 @@ function getDefault(tenantId) {
 
 function registerSandbox(entry, tenantId) {
   const data = load(tenantId);
-  data.sandboxes[entry.name] = {
-    name: entry.name,
+  const name = normalizeName(entry.name);
+  data.sandboxes[name] = {
+    name,
     createdAt: entry.createdAt || new Date().toISOString(),
     model: entry.model || null,
     nimContainer: entry.nimContainer || null,
@@ -64,24 +71,26 @@ function registerSandbox(entry, tenantId) {
     policies: entry.policies || [],
   };
   if (!data.defaultSandbox) {
-    data.defaultSandbox = entry.name;
+    data.defaultSandbox = name;
   }
   save(data, tenantId);
 }
 
 function updateSandbox(name, updates, tenantId) {
   const data = load(tenantId);
-  if (!data.sandboxes[name]) return false;
-  Object.assign(data.sandboxes[name], updates);
+  const key = normalizeName(name);
+  if (!data.sandboxes[key]) return false;
+  Object.assign(data.sandboxes[key], updates);
   save(data, tenantId);
   return true;
 }
 
 function removeSandbox(name, tenantId) {
   const data = load(tenantId);
-  if (!data.sandboxes[name]) return false;
-  delete data.sandboxes[name];
-  if (data.defaultSandbox === name) {
+  const key = normalizeName(name);
+  if (!data.sandboxes[key]) return false;
+  delete data.sandboxes[key];
+  if (data.defaultSandbox === key) {
     const remaining = Object.keys(data.sandboxes);
     data.defaultSandbox = remaining.length > 0 ? remaining[0] : null;
   }
@@ -99,8 +108,9 @@ function listSandboxes(tenantId) {
 
 function setDefault(name, tenantId) {
   const data = load(tenantId);
-  if (!data.sandboxes[name]) return false;
-  data.defaultSandbox = name;
+  const key = normalizeName(name);
+  if (!data.sandboxes[key]) return false;
+  data.defaultSandbox = key;
   save(data, tenantId);
   return true;
 }

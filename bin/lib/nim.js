@@ -136,19 +136,31 @@ function startNimContainer(sandboxName, model, port = 8000) {
   // Stop any existing container with same name
   run(`docker rm -f ${name} 2>/dev/null || true`, { ignoreError: true });
 
+  // Mount NGC credentials if available — some NIM images require NGC auth
+  // for model download on first run. From OpenClaw 0ed64f124d.
+  const ngcConfigPath = require("path").join(process.env.HOME || "/tmp", ".nv");
+  const ngcMount = require("fs").existsSync(ngcConfigPath) ? `-v "${ngcConfigPath}:/root/.nv:ro"` : "";
+
   console.log(`  Starting NIM container: ${name}`);
   run(
-    `docker run -d --gpus all -p ${port}:8000 --name ${name} --shm-size 16g ${image}`
+    `docker run -d --gpus all -p ${port}:8000 --name ${name} --shm-size 16g ${ngcMount} ${image}`
   );
   return name;
 }
 
-function waitForNimHealth(port = 8000, timeout = 300) {
+function waitForNimHealth(port = 8000, timeout) {
+  // Allow configurable timeout via env var for large models on DGX Spark
+  // or multi-GPU setups that need longer startup. From OpenClaw f77a684131.
+  const envTimeout = parseInt(process.env.NEMOCLAW_NIM_HEALTH_TIMEOUT, 10);
+  const effectiveTimeout = timeout ?? (Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : 300);
   const start = Date.now();
-  const interval = 5000;
-  console.log(`  Waiting for NIM health on port ${port} (timeout: ${timeout}s)...`);
+  // Exponential backoff: start at 5s, double up to 30s cap.
+  // From OpenClaw 44304ba24a — avoids hammering health endpoint.
+  let interval = 5;
+  const maxInterval = 30;
+  console.log(`  Waiting for NIM health on port ${port} (timeout: ${effectiveTimeout}s)...`);
 
-  while ((Date.now() - start) / 1000 < timeout) {
+  while ((Date.now() - start) / 1000 < effectiveTimeout) {
     try {
       const result = runCapture(`curl -sf http://localhost:${port}/v1/models`, {
         ignoreError: true,
@@ -158,10 +170,10 @@ function waitForNimHealth(port = 8000, timeout = 300) {
         return true;
       }
     } catch {}
-    // Synchronous sleep via spawnSync
-    require("child_process").spawnSync("sleep", ["5"]);
+    require("child_process").spawnSync("sleep", [String(interval)]);
+    interval = Math.min(interval * 2, maxInterval);
   }
-  console.error(`  NIM did not become healthy within ${timeout}s.`);
+  console.error(`  NIM did not become healthy within ${effectiveTimeout}s.`);
   return false;
 }
 

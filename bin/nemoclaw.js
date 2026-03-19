@@ -15,8 +15,13 @@ const {
   isRepoPrivate,
 } = require("./lib/credentials");
 const registry = require("./lib/registry");
-const nim = require("./lib/nim");
-const policies = require("./lib/policies");
+
+// Lazy-load heavy modules that aren't needed for simple commands like
+// help, list, or status. From OpenClaw 91d37ccfc3 — avoid loading GPU
+// detection and policy YAML parsing on every CLI invocation.
+let _nim, _policies;
+function getNim() { return _nim || (_nim = require("./lib/nim")); }
+function getPolicies() { return _policies || (_policies = require("./lib/policies")); }
 
 // ── Global commands ──────────────────────────────────────────────
 
@@ -101,6 +106,11 @@ async function deploy(instanceName) {
   const name = instanceName;
   const gpu = process.env.NEMOCLAW_GPU || "a2-highgpu-1g:nvidia-tesla-a100:1";
 
+  // SSH connection multiplexing — reuse one TCP connection for all SSH/SCP/rsync
+  // commands in the deploy flow. Saves 0.5-2s per handshake. From OpenClaw ae7f18e503.
+  const SSH_MUX = `-o ControlMaster=auto -o ControlPath=/tmp/nemoclaw-ssh-%r@%h:%p -o ControlPersist=300`;
+  const SSH_OPTS = `-o StrictHostKeyChecking=no -o LogLevel=ERROR ${SSH_MUX}`;
+
   console.log("");
   console.log(`  Deploying NemoClaw to Brev instance: ${name}`);
   console.log("");
@@ -130,7 +140,7 @@ async function deploy(instanceName) {
   console.log("  Waiting for SSH...");
   for (let i = 0; i < 60; i++) {
     try {
-      execSync(`ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${name} 'echo ok' 2>/dev/null`, { encoding: "utf-8", stdio: "pipe" });
+      execSync(`ssh -o ConnectTimeout=5 ${SSH_OPTS} ${name} 'echo ok' 2>/dev/null`, { encoding: "utf-8", stdio: "pipe" });
       break;
     } catch {
       if (i === 59) {
@@ -142,8 +152,8 @@ async function deploy(instanceName) {
   }
 
   console.log("  Syncing NemoClaw to VM...");
-  run(`ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ${name} 'mkdir -p /home/ubuntu/nemoclaw'`);
-  run(`rsync -az --delete --exclude node_modules --exclude .git --exclude src -e "ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR" "${ROOT}/scripts" "${ROOT}/Dockerfile" "${ROOT}/nemoclaw" "${ROOT}/nemoclaw-blueprint" "${ROOT}/bin" "${ROOT}/package.json" ${name}:/home/ubuntu/nemoclaw/`);
+  run(`ssh ${SSH_OPTS} ${name} 'mkdir -p /home/ubuntu/nemoclaw'`);
+  run(`rsync -az --delete --exclude node_modules --exclude .git --exclude src -e "ssh ${SSH_OPTS}" "${ROOT}/scripts" "${ROOT}/Dockerfile" "${ROOT}/nemoclaw" "${ROOT}/nemoclaw-blueprint" "${ROOT}/bin" "${ROOT}/package.json" ${name}:/home/ubuntu/nemoclaw/`);
 
   const envLines = [`NVIDIA_API_KEY=${process.env.NVIDIA_API_KEY}`];
   const ghToken = process.env.GITHUB_TOKEN;
@@ -152,21 +162,21 @@ async function deploy(instanceName) {
   if (tgToken) envLines.push(`TELEGRAM_BOT_TOKEN=${tgToken}`);
   const envTmp = path.join(os.tmpdir(), `nemoclaw-env-${Date.now()}`);
   fs.writeFileSync(envTmp, envLines.join("\n") + "\n", { mode: 0o600 });
-  run(`scp -q -o StrictHostKeyChecking=no -o LogLevel=ERROR "${envTmp}" ${name}:/home/ubuntu/nemoclaw/.env`);
+  run(`scp -q ${SSH_OPTS} "${envTmp}" ${name}:/home/ubuntu/nemoclaw/.env`);
   fs.unlinkSync(envTmp);
 
   console.log("  Running setup...");
-  runInteractive(`ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR ${name} 'cd /home/ubuntu/nemoclaw && set -a && . .env && set +a && bash scripts/brev-setup.sh'`);
+  runInteractive(`ssh -t ${SSH_OPTS} ${name} 'cd /home/ubuntu/nemoclaw && set -a && . .env && set +a && bash scripts/brev-setup.sh'`);
 
   if (tgToken) {
     console.log("  Starting services...");
-    run(`ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ${name} 'cd /home/ubuntu/nemoclaw && set -a && . .env && set +a && bash scripts/start-services.sh'`);
+    run(`ssh ${SSH_OPTS} ${name} 'cd /home/ubuntu/nemoclaw && set -a && . .env && set +a && bash scripts/start-services.sh'`);
   }
 
   console.log("");
   console.log("  Connecting to sandbox...");
   console.log("");
-  runInteractive(`ssh -t -o StrictHostKeyChecking=no -o LogLevel=ERROR ${name} 'cd /home/ubuntu/nemoclaw && set -a && . .env && set +a && openshell sandbox connect nemoclaw'`);
+  runInteractive(`ssh -t ${SSH_OPTS} ${name} 'cd /home/ubuntu/nemoclaw && set -a && . .env && set +a && openshell sandbox connect nemoclaw'`);
 }
 
 async function start() {
@@ -255,7 +265,7 @@ function sandboxStatus(sandboxName) {
   run(`openshell sandbox get "${sandboxName}" 2>/dev/null || true`, { ignoreError: true });
 
   // NIM health
-  const nimStat = nim.nimStatus(sandboxName);
+  const nimStat = getNim().nimStatus(sandboxName);
   console.log(`    NIM:      ${nimStat.running ? `running (${nimStat.container})` : "not running"}`);
   if (nimStat.running) {
     console.log(`    Healthy:  ${nimStat.healthy ? "yes" : "no"}`);
@@ -269,8 +279,8 @@ function sandboxLogs(sandboxName, follow) {
 }
 
 async function sandboxPolicyAdd(sandboxName) {
-  const allPresets = policies.listPresets();
-  const applied = policies.getAppliedPresets(sandboxName);
+  const allPresets = getPolicies().listPresets();
+  const applied = getPolicies().getAppliedPresets(sandboxName);
 
   console.log("");
   console.log("  Available presets:");
@@ -287,12 +297,12 @@ async function sandboxPolicyAdd(sandboxName) {
   const confirm = await askPrompt(`  Apply '${answer}' to sandbox '${sandboxName}'? [Y/n]: `);
   if (confirm.toLowerCase() === "n") return;
 
-  policies.applyPreset(sandboxName, answer);
+  getPolicies().applyPreset(sandboxName, answer);
 }
 
 function sandboxPolicyList(sandboxName) {
-  const allPresets = policies.listPresets();
-  const applied = policies.getAppliedPresets(sandboxName);
+  const allPresets = getPolicies().listPresets();
+  const applied = getPolicies().getAppliedPresets(sandboxName);
 
   console.log("");
   console.log(`  Policy presets for sandbox '${sandboxName}':`);
@@ -305,7 +315,7 @@ function sandboxPolicyList(sandboxName) {
 
 function sandboxDestroy(sandboxName) {
   console.log(`  Stopping NIM for '${sandboxName}'...`);
-  nim.stopNimContainer(sandboxName);
+  getNim().stopNimContainer(sandboxName);
 
   console.log(`  Deleting sandbox '${sandboxName}'...`);
   run(`openshell sandbox delete "${sandboxName}" 2>/dev/null || true`, { ignoreError: true });
