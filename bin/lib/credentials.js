@@ -49,8 +49,18 @@ function saveCredential(key, value, tenantId) {
 }
 
 function getCredential(key, tenantId) {
+  // When operating in tenant-scoped mode, ONLY read from the tenant's
+  // credential file. Falling through to process.env would leak a global
+  // env var (e.g., NVIDIA_API_KEY set in the operator's shell) into a
+  // tenant-scoped request, breaking credential isolation.
+  // Ported from OpenClaw fix da34f81ce2.
+  if (tenantId) {
+    const creds = loadCredentials(tenantId);
+    return creds[key] || null;
+  }
+  // Global (single-tenant) mode: env var first, then global creds file
   if (process.env[key]) return process.env[key];
-  const creds = loadCredentials(tenantId);
+  const creds = loadCredentials();
   return creds[key] || null;
 }
 

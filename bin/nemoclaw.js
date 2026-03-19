@@ -170,7 +170,15 @@ async function deploy(instanceName) {
 }
 
 async function start() {
-  await ensureApiKey();
+  // Only prompt for API key if not already available. The start command may
+  // only need to launch the Telegram bridge (which uses a saved token), so
+  // blocking on an NVIDIA key prompt wastes time. Ported from OpenClaw fix
+  // d1e4ee03ff which skips eager warmup for non-model CLI commands.
+  if (!getCredential("NVIDIA_API_KEY")) {
+    await ensureApiKey();
+  } else {
+    process.env.NVIDIA_API_KEY = getCredential("NVIDIA_API_KEY");
+  }
   const { defaultSandbox } = registry.listSandboxes(tenantId);
   const safeName = defaultSandbox && /^[a-zA-Z0-9._-]+$/.test(defaultSandbox) ? defaultSandbox : null;
   const sandboxEnv = safeName ? `SANDBOX_NAME="${safeName}"` : "";

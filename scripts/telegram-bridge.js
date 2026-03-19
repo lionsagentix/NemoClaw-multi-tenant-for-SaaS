@@ -39,6 +39,48 @@ if (!API_KEY) { console.error("NVIDIA_API_KEY required"); process.exit(1); }
 let offset = 0;
 const activeSessions = new Map(); // chatId → message history
 
+// ── Session persistence ───────────────────────────────────────────
+// Persist session state to disk so context survives bridge restarts.
+// Ported from OpenClaw orphan recovery fixes 304703f165, 44304ba24a.
+const SESSION_FILE = require("path").join(
+  process.env.HOME || "/tmp", ".nemoclaw", "state", "telegram-sessions.json"
+);
+const SESSION_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour staleness threshold
+
+function loadPersistedSessions() {
+  try {
+    if (require("fs").existsSync(SESSION_FILE)) {
+      const data = JSON.parse(require("fs").readFileSync(SESSION_FILE, "utf-8"));
+      const now = Date.now();
+      for (const [chatId, session] of Object.entries(data)) {
+        // Skip stale sessions older than 1 hour
+        if (session.lastActivity && (now - session.lastActivity) < SESSION_MAX_AGE_MS) {
+          activeSessions.set(chatId, session);
+        }
+      }
+      if (activeSessions.size > 0) {
+        console.log(`  Restored ${activeSessions.size} session(s) from disk`);
+      }
+    }
+  } catch {}
+}
+
+function persistSessions() {
+  try {
+    const dir = require("path").dirname(SESSION_FILE);
+    require("fs").mkdirSync(dir, { recursive: true });
+    const obj = Object.fromEntries(activeSessions);
+    require("fs").writeFileSync(SESSION_FILE, JSON.stringify(obj, null, 2));
+  } catch {}
+}
+
+function touchSession(chatId) {
+  const session = activeSessions.get(chatId) || {};
+  session.lastActivity = Date.now();
+  activeSessions.set(chatId, session);
+  persistSessions();
+}
+
 // ── Telegram API helpers ──────────────────────────────────────────
 
 function tgApi(method, body) {
@@ -150,9 +192,15 @@ function runAgentInSandbox(message, sessionId) {
 
 // ── Poll loop ─────────────────────────────────────────────────────
 
+let pollBackoff = 100; // ms, resets on success, doubles on failure (max 30s)
+const POLL_BACKOFF_MAX = 30000;
+
 async function poll() {
   try {
     const res = await tgApi("getUpdates", { offset, timeout: 30 });
+
+    // Reset backoff on successful poll
+    pollBackoff = 100;
 
     if (res.ok && res.result?.length > 0) {
       for (const update of res.result) {
@@ -188,9 +236,13 @@ async function poll() {
         // Handle /reset
         if (msg.text === "/reset") {
           activeSessions.delete(chatId);
+          persistSessions();
           await sendMessage(chatId, "Session reset.", msg.message_id);
           continue;
         }
+
+        // Track session activity for persistence
+        touchSession(chatId);
 
         // Send typing indicator
         await sendTyping(chatId);
@@ -210,16 +262,21 @@ async function poll() {
       }
     }
   } catch (err) {
-    console.error("Poll error:", err.message);
+    console.error(`Poll error (retry in ${pollBackoff}ms):`, err.message);
+    // Exponential backoff on failure to avoid hammering Telegram API
+    pollBackoff = Math.min(pollBackoff * 2, POLL_BACKOFF_MAX);
   }
 
-  // Continue polling
-  setTimeout(poll, 100);
+  // Continue polling (with backoff delay on errors)
+  setTimeout(poll, pollBackoff);
 }
 
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
+  // Restore sessions from previous run (if any)
+  loadPersistedSessions();
+
   const me = await tgApi("getMe", {});
   if (!me.ok) {
     console.error("Failed to connect to Telegram:", JSON.stringify(me));

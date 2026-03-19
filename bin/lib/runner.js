@@ -13,12 +13,43 @@ if (dockerHost) {
   process.env.DOCKER_HOST = dockerHost.dockerHost;
 }
 
+// ── Env injection blocklist ──────────────────────────────────────
+// Prevent child processes from inheriting dangerous environment variables
+// that could be used for code injection via build tools, linkers, or runtimes.
+// Ported from OpenClaw security fixes 089a43f5e8 and f84a41dcb8.
+const BLOCKED_ENV_VARS = new Set([
+  // Linker injection
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+  // Shell injection
+  "BASH_ENV", "ENV", "CDPATH", "IFS", "PS4",
+  // glibc
+  "GCONV_PATH", "GLIBC_TUNABLES",
+  // JVM injection
+  "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+  // Build tool JVM args
+  "MAVEN_OPTS", "SBT_OPTS", "GRADLE_OPTS", "ANT_OPTS", "GRADLE_USER_HOME",
+  // Python / .NET injection
+  "PYTHONBREAKPOINT", "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS",
+  // TLS key logging
+  "SSLKEYLOGFILE",
+]);
+
+function sanitizeEnv(extraEnv) {
+  const base = { ...process.env, ...extraEnv };
+  for (const key of Object.keys(base)) {
+    if (BLOCKED_ENV_VARS.has(key) || key.startsWith("BASH_FUNC_")) {
+      delete base[key];
+    }
+  }
+  return base;
+}
+
 function run(cmd, opts = {}) {
   const stdio = opts.stdio ?? ["ignore", "inherit", "inherit"];
   const result = spawnSync("bash", ["-c", cmd], {
     stdio,
     cwd: ROOT,
-    env: { ...process.env, ...opts.env },
+    env: sanitizeEnv(opts.env),
     ...opts,
   });
   if (result.status !== 0 && !opts.ignoreError) {
@@ -33,7 +64,7 @@ function runInteractive(cmd, opts = {}) {
   const result = spawnSync("bash", ["-c", cmd], {
     stdio,
     cwd: ROOT,
-    env: { ...process.env, ...opts.env },
+    env: sanitizeEnv(opts.env),
     ...opts,
   });
   if (result.status !== 0 && !opts.ignoreError) {
@@ -48,7 +79,7 @@ function runCapture(cmd, opts = {}) {
     return execSync(cmd, {
       encoding: "utf-8",
       cwd: ROOT,
-      env: { ...process.env, ...opts.env },
+      env: sanitizeEnv(opts.env),
       stdio: ["pipe", "pipe", "pipe"],
       ...opts,
     }).trim();

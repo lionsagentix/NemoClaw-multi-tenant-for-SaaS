@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execSync } from "node:child_process";
+import { join } from "node:path";
 import type { PluginLogger, NemoClawConfig } from "../index.js";
 import { resolveBlueprint } from "../blueprint/resolve.js";
 import { verifyBlueprintDigest, checkCompatibility } from "../blueprint/verify.js";
@@ -49,6 +50,35 @@ export async function cliLaunch(opts: LaunchOptions): Promise<void> {
       "Use --force to proceed with a fresh launch (existing config will not be migrated).",
     );
     return;
+  }
+
+  // Check for OpenClaw's native OpenShell sandbox backend (added in d8b927ee6a).
+  // If the user has the openshell extension configured, warn about potential
+  // sandbox name collisions. NemoClaw sandboxes should be namespaced to avoid
+  // conflicting with sandboxes managed by OpenClaw's built-in openshell backend.
+  try {
+    const openclawConfigPath = join(
+      process.env.HOME || "",
+      ".openclaw",
+      "openclaw.json",
+    );
+    const { readFileSync, existsSync: configExists } = await import("node:fs");
+    if (configExists(openclawConfigPath)) {
+      const config = JSON.parse(readFileSync(openclawConfigPath, "utf-8"));
+      const openshellPlugin = config?.plugins?.entries?.openshell;
+      if (openshellPlugin?.enabled !== false) {
+        const nativeSandbox = openshellPlugin?.config?.sandboxName ?? "openclaw";
+        if (pluginConfig.sandboxName === nativeSandbox) {
+          logger.warn(
+            `Sandbox name '${pluginConfig.sandboxName}' may collide with OpenClaw's native ` +
+            `openshell backend (also using '${nativeSandbox}'). Consider using a different ` +
+            `sandbox name via pluginConfig.sandboxName to avoid conflicts.`,
+          );
+        }
+      }
+    }
+  } catch {
+    // Config read failure is non-fatal — proceed with launch
   }
 
   // Resolve and verify blueprint

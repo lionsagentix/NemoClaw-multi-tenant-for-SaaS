@@ -95,6 +95,16 @@ function buildSandboxConfigSyncScript(selectionConfig) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 131072,
         maxTokens: 4096,
+        // Non-native OpenAI endpoints (NIM, vLLM, Ollama) don't support
+        // the 'developer' role or strict-mode tool schemas. Without these
+        // flags, tool calls are silently dropped and developer-role messages
+        // cause 400 errors. Ported from OpenClaw fixes 9616d1e8ba, bb06dc7cc9.
+        compat: {
+          supportsDeveloperRole: false,
+          supportsStrictMode: false,
+          supportsStreamUsage: false,
+          supportsPromptCache: false,
+        },
       },
     ],
   };
@@ -214,7 +224,9 @@ function parsePolicyPresetEnv(value) {
 }
 
 function isSafeModelId(value) {
-  return /^[A-Za-z0-9._:/-]+$/.test(value);
+  // Allow @ for version-suffixed model IDs like model@20260301.
+  // Ported from OpenClaw fix 2c579b6ac1.
+  return /^[A-Za-z0-9._:/@-]+$/.test(value);
 }
 
 function getNonInteractiveProvider() {

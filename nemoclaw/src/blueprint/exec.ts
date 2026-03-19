@@ -6,6 +6,28 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { PluginLogger } from "../index.js";
 
+// Env vars blocked from child processes to prevent injection attacks.
+// Ported from OpenClaw security fixes 089a43f5e8 and f84a41dcb8.
+const BLOCKED_ENV_VARS = new Set([
+  "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+  "BASH_ENV", "ENV", "CDPATH", "IFS", "PS4",
+  "GCONV_PATH", "GLIBC_TUNABLES",
+  "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+  "MAVEN_OPTS", "SBT_OPTS", "GRADLE_OPTS", "ANT_OPTS", "GRADLE_USER_HOME",
+  "PYTHONBREAKPOINT", "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS",
+  "SSLKEYLOGFILE",
+]);
+
+function sanitizeEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const base: Record<string, string> = { ...process.env as Record<string, string>, ...extra };
+  for (const key of Object.keys(base)) {
+    if (BLOCKED_ENV_VARS.has(key) || key.startsWith("BASH_FUNC_")) {
+      delete base[key];
+    }
+  }
+  return base;
+}
+
 export type BlueprintAction = "plan" | "apply" | "status" | "rollback";
 
 export interface BlueprintRunOptions {
@@ -43,6 +65,18 @@ export async function execBlueprint(
     return failResult(options.action, msg);
   }
 
+  // Verify the blueprint directory contains expected marker files before
+  // executing. A malicious blueprint could contain a runner.py that
+  // exfiltrates credentials. Ported from OpenClaw stabilization fix a2a9a553e1.
+  const requiredMarkers = ["blueprint.yaml", "orchestrator/runner.py"];
+  for (const marker of requiredMarkers) {
+    if (!existsSync(join(options.blueprintPath, marker))) {
+      const msg = `Blueprint missing required file: ${marker}. The blueprint may be corrupt or tampered with.`;
+      logger.error(msg);
+      return failResult(options.action, msg);
+    }
+  }
+
   const args: string[] = [runnerPath, options.action, "--profile", options.profile];
 
   if (options.jsonOutput) args.push("--json");
@@ -57,11 +91,10 @@ export async function execBlueprint(
     const chunks: string[] = [];
     const proc = spawn("python3", args, {
       cwd: options.blueprintPath,
-      env: {
-        ...process.env,
+      env: sanitizeEnv({
         NEMOCLAW_BLUEPRINT_PATH: options.blueprintPath,
         NEMOCLAW_ACTION: options.action,
-      },
+      }),
       stdio: ["pipe", "pipe", "pipe"],
     });
 
