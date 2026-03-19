@@ -47,3 +47,7 @@ export {
 // Resource tiers
 export type { ResourceTier } from "./resource-tiers.js";
 export { DEFAULT_RESOURCE_TIERS } from "./resource-tiers.js";
+
+// Tenant lifecycle coordinator
+export { createTenantLifecycle } from "./tenant-lifecycle.js";
+export type { TenantLifecycle, TenantLifecycleConfig } from "./tenant-lifecycle.js";

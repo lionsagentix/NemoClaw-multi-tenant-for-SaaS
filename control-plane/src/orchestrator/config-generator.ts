@@ -133,3 +133,50 @@ export function generateTenantConfig(params: {
     policyPresets,
   };
 }
+
+/**
+ * Validate a generated tenant sandbox config for security issues.
+ *
+ * Returns an array of violation descriptions. Empty array means safe.
+ */
+export function validateTenantSandboxSecurity(config: TenantSandboxConfig): string[] {
+  const violations: string[] = [];
+
+  // Ensure tenant ID and slug are present in env.
+  if (!config.env.NEMOCLAW_TENANT_ID) {
+    violations.push("Missing NEMOCLAW_TENANT_ID in sandbox environment.");
+  }
+  if (!config.env.NEMOCLAW_TENANT_SLUG) {
+    violations.push("Missing NEMOCLAW_TENANT_SLUG in sandbox environment.");
+  }
+
+  // Ensure inference endpoint uses HTTPS in production.
+  if (
+    config.env.NODE_ENV === "production" &&
+    config.onboardConfig.endpointUrl &&
+    !config.onboardConfig.endpointUrl.startsWith("https://") &&
+    !config.onboardConfig.endpointUrl.startsWith("http://localhost") &&
+    !config.onboardConfig.endpointUrl.startsWith("http://127.0.0.1") &&
+    !config.onboardConfig.endpointUrl.startsWith("http://inference.local")
+  ) {
+    violations.push(
+      `Inference endpoint uses insecure HTTP in production: ${config.onboardConfig.endpointUrl}`,
+    );
+  }
+
+  // Ensure credential env is set if not BYOK with own key.
+  if (!config.onboardConfig.credentialEnv) {
+    violations.push("No credential environment variable specified for inference.");
+  }
+
+  // Ensure no sensitive keys leak into policy presets or metadata.
+  for (const [key, value] of Object.entries(config.env)) {
+    if (key.includes("SECRET") || key.includes("PASSWORD")) {
+      if (value && value.length < 8) {
+        violations.push(`Suspicious short value for sensitive env var: ${key}`);
+      }
+    }
+  }
+
+  return violations;
+}

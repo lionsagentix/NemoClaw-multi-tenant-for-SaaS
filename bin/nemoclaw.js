@@ -23,8 +23,35 @@ const policies = require("./lib/policies");
 const GLOBAL_COMMANDS = new Set([
   "onboard", "list", "deploy", "setup", "setup-spark",
   "start", "stop", "status",
+  "tenant",
   "help", "--help", "-h",
 ]);
+
+// ── Tenant context ──────────────────────────────────────────────
+
+/**
+ * Parse --tenant <id> from argv. Returns { tenantId, remainingArgs }.
+ * If no --tenant flag, tenantId is undefined (single-tenant mode).
+ */
+function parseTenantFlag(argv) {
+  const tenantIdx = argv.indexOf("--tenant");
+  if (tenantIdx === -1) {
+    return { tenantId: undefined, remainingArgs: argv };
+  }
+  const tenantId = argv[tenantIdx + 1];
+  if (!tenantId || tenantId.startsWith("-")) {
+    console.error("  Error: --tenant requires a tenant ID argument.");
+    console.error("  Usage: nemoclaw --tenant <tenant-id> <command>");
+    process.exit(1);
+  }
+  const remainingArgs = [...argv.slice(0, tenantIdx), ...argv.slice(tenantIdx + 2)];
+  return { tenantId, remainingArgs };
+}
+
+// Also check NEMOCLAW_TENANT_ID env var as fallback.
+function resolveTenantId(flagTenantId) {
+  return flagTenantId || process.env.NEMOCLAW_TENANT_ID || undefined;
+}
 
 // ── Commands ─────────────────────────────────────────────────────
 
@@ -47,7 +74,7 @@ async function setup() {
   console.log("     Running legacy setup.sh for backwards compatibility...");
   console.log("");
   await ensureApiKey();
-  const { defaultSandbox } = registry.listSandboxes();
+  const { defaultSandbox } = registry.listSandboxes(tenantId);
   const safeName = defaultSandbox && /^[a-z0-9][a-z0-9-]*[a-z0-9]$/.test(defaultSandbox) ? defaultSandbox : "";
   run(`bash "${SCRIPTS}/setup.sh" ${safeName}`);
 }
@@ -144,7 +171,7 @@ async function deploy(instanceName) {
 
 async function start() {
   await ensureApiKey();
-  const { defaultSandbox } = registry.listSandboxes();
+  const { defaultSandbox } = registry.listSandboxes(tenantId);
   const safeName = defaultSandbox && /^[a-zA-Z0-9._-]+$/.test(defaultSandbox) ? defaultSandbox : null;
   const sandboxEnv = safeName ? `SANDBOX_NAME="${safeName}"` : "";
   run(`${sandboxEnv} bash "${SCRIPTS}/start-services.sh"`);
@@ -156,7 +183,7 @@ function stop() {
 
 function showStatus() {
   // Show sandbox registry
-  const { sandboxes, defaultSandbox } = registry.listSandboxes();
+  const { sandboxes, defaultSandbox } = registry.listSandboxes(tenantId);
   if (sandboxes.length > 0) {
     console.log("");
     console.log("  Sandboxes:");
@@ -173,7 +200,7 @@ function showStatus() {
 }
 
 function listSandboxes() {
-  const { sandboxes, defaultSandbox } = registry.listSandboxes();
+  const { sandboxes, defaultSandbox } = registry.listSandboxes(tenantId);
   if (sandboxes.length === 0) {
     console.log("");
     console.log("  No sandboxes registered. Run `nemoclaw onboard` to get started.");
@@ -206,7 +233,7 @@ function sandboxConnect(sandboxName) {
 }
 
 function sandboxStatus(sandboxName) {
-  const sb = registry.getSandbox(sandboxName);
+  const sb = registry.getSandbox(sandboxName, tenantId);
   if (sb) {
     console.log("");
     console.log(`  Sandbox: ${sb.name}`);
@@ -275,7 +302,7 @@ function sandboxDestroy(sandboxName) {
   console.log(`  Deleting sandbox '${sandboxName}'...`);
   run(`openshell sandbox delete "${sandboxName}" 2>/dev/null || true`, { ignoreError: true });
 
-  registry.removeSandbox(sandboxName);
+  registry.removeSandbox(sandboxName, tenantId);
   console.log(`  ✓ Sandbox '${sandboxName}' destroyed`);
 }
 
@@ -301,6 +328,13 @@ function help() {
     nemoclaw <name> policy-add       Add a policy preset to a sandbox
     nemoclaw <name> policy-list      List presets (● = applied)
 
+  Multi-Tenant:
+    nemoclaw tenant list             List all tenants
+    nemoclaw tenant create <slug>    Create a new tenant
+    nemoclaw tenant status <slug>    Show tenant status
+    nemoclaw tenant suspend <slug>   Suspend a tenant
+    nemoclaw tenant resume <slug>    Resume a suspended tenant
+
   Deploy:
     nemoclaw deploy <instance>       Deploy to a Brev VM and start services
 
@@ -309,14 +343,82 @@ function help() {
     nemoclaw stop                    Stop all services
     nemoclaw status                  Show sandbox list and service status
 
+  Options:
+    --tenant <id>                    Set tenant context for all commands
+                                     (or set NEMOCLAW_TENANT_ID env var)
+
   Credentials are prompted on first use, then saved securely
   in ~/.nemoclaw/credentials.json (mode 600).
 `);
 }
 
+// ── Tenant subcommands ───────────────────────────────────────────
+
+function tenantHelp() {
+  console.log(`
+  nemoclaw tenant — Multi-tenant management commands
+
+  Commands:
+    nemoclaw tenant list                     List all tenants
+    nemoclaw tenant create <slug>            Create a new tenant
+    nemoclaw tenant status <slug>            Show tenant status
+    nemoclaw tenant suspend <slug>           Suspend a tenant
+    nemoclaw tenant resume <slug>            Resume a suspended tenant
+
+  Notes:
+    These commands require a running control plane.
+    Set NEMOCLAW_CP_DATABASE_URL to connect to the control plane database.
+`);
+}
+
+async function tenantCommand(subArgs) {
+  const [action, ...rest] = subArgs;
+  if (!action || action === "help") {
+    tenantHelp();
+    return;
+  }
+
+  switch (action) {
+    case "list":
+      console.log("  Tenant listing requires the control plane REST API (Phase 5).");
+      console.log("  Use: curl http://localhost:8080/api/tenants");
+      break;
+    case "create":
+      if (!rest[0]) {
+        console.error("  Usage: nemoclaw tenant create <slug>");
+        process.exit(1);
+      }
+      console.log(`  Tenant creation for '${rest[0]}' requires the control plane REST API (Phase 5).`);
+      console.log("  Use: curl -X POST http://localhost:8080/api/tenants -d '{...}'");
+      break;
+    case "status":
+      if (!rest[0]) {
+        console.error("  Usage: nemoclaw tenant status <slug>");
+        process.exit(1);
+      }
+      console.log(`  Tenant status for '${rest[0]}' requires the control plane REST API (Phase 5).`);
+      break;
+    case "suspend":
+    case "resume":
+      if (!rest[0]) {
+        console.error(`  Usage: nemoclaw tenant ${action} <slug>`);
+        process.exit(1);
+      }
+      console.log(`  Tenant ${action} for '${rest[0]}' requires the control plane REST API (Phase 5).`);
+      break;
+    default:
+      console.error(`  Unknown tenant command: ${action}`);
+      tenantHelp();
+      process.exit(1);
+  }
+}
+
 // ── Dispatch ─────────────────────────────────────────────────────
 
-const [cmd, ...args] = process.argv.slice(2);
+// Parse --tenant flag from argv before dispatch.
+const { tenantId: flagTenantId, remainingArgs: parsedArgv } = parseTenantFlag(process.argv.slice(2));
+const tenantId = resolveTenantId(flagTenantId);
+const [cmd, ...args] = parsedArgv;
 
 (async () => {
   // No command → help
@@ -336,13 +438,15 @@ const [cmd, ...args] = process.argv.slice(2);
       case "stop":        stop(); break;
       case "status":      showStatus(); break;
       case "list":        listSandboxes(); break;
+      case "tenant":      await tenantCommand(args); break;
       default:            help(); break;
     }
     return;
   }
 
   // Sandbox-scoped commands: nemoclaw <name> <action>
-  const sandbox = registry.getSandbox(cmd);
+  // Pass tenantId to registry lookups for tenant isolation.
+  const sandbox = registry.getSandbox(cmd, tenantId);
   if (sandbox) {
     const action = args[0] || "connect";
     const actionArgs = args.slice(1);
@@ -367,7 +471,7 @@ const [cmd, ...args] = process.argv.slice(2);
   console.error("");
 
   // Check if it looks like a sandbox name with missing action
-  const allNames = registry.listSandboxes().sandboxes.map((s) => s.name);
+  const allNames = registry.listSandboxes(tenantId).sandboxes.map((s) => s.name);
   if (allNames.length > 0) {
     console.error(`  Registered sandboxes: ${allNames.join(", ")}`);
     console.error(`  Try: nemoclaw <sandbox-name> connect`);

@@ -105,7 +105,7 @@ export function createMockBillingProvider(): BillingProvider {
           provider: "mock",
           amountCents: 0, // Free in mock mode
           currency: "usd",
-          status: "paid",
+          status: "paid" as const,
           periodStart: sub.currentPeriodStart ?? new Date().toISOString(),
           periodEnd: sub.currentPeriodEnd ?? new Date().toISOString(),
           createdAt: new Date().toISOString(),

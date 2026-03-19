@@ -6,28 +6,51 @@ const path = require("path");
 const readline = require("readline");
 const { execSync } = require("child_process");
 
-const CREDS_DIR = path.join(process.env.HOME || "/tmp", ".nemoclaw");
-const CREDS_FILE = path.join(CREDS_DIR, "credentials.json");
+const GLOBAL_CREDS_DIR = path.join(process.env.HOME || "/tmp", ".nemoclaw");
 
-function loadCredentials() {
+/**
+ * Resolve credentials directory. If tenantId is provided, uses
+ * ~/.nemoclaw/tenants/{tenantId}/credentials.json for tenant isolation.
+ * Falls back to global ~/.nemoclaw/credentials.json for single-tenant mode.
+ */
+function resolveCredsPath(tenantId) {
+  if (tenantId) {
+    return {
+      dir: path.join(process.env.HOME || "/tmp", ".nemoclaw", "tenants", tenantId),
+      file: path.join(process.env.HOME || "/tmp", ".nemoclaw", "tenants", tenantId, "credentials.json"),
+    };
+  }
+  return {
+    dir: GLOBAL_CREDS_DIR,
+    file: path.join(GLOBAL_CREDS_DIR, "credentials.json"),
+  };
+}
+
+// Backward-compatible exports (point to global)
+const CREDS_DIR = GLOBAL_CREDS_DIR;
+const CREDS_FILE = path.join(GLOBAL_CREDS_DIR, "credentials.json");
+
+function loadCredentials(tenantId) {
+  const { file } = resolveCredsPath(tenantId);
   try {
-    if (fs.existsSync(CREDS_FILE)) {
-      return JSON.parse(fs.readFileSync(CREDS_FILE, "utf-8"));
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, "utf-8"));
     }
   } catch {}
   return {};
 }
 
-function saveCredential(key, value) {
-  fs.mkdirSync(CREDS_DIR, { recursive: true, mode: 0o700 });
-  const creds = loadCredentials();
+function saveCredential(key, value, tenantId) {
+  const { dir, file } = resolveCredsPath(tenantId);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const creds = loadCredentials(tenantId);
   creds[key] = value;
-  fs.writeFileSync(CREDS_FILE, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  fs.writeFileSync(file, JSON.stringify(creds, null, 2), { mode: 0o600 });
 }
 
-function getCredential(key) {
+function getCredential(key, tenantId) {
   if (process.env[key]) return process.env[key];
-  const creds = loadCredentials();
+  const creds = loadCredentials(tenantId);
   return creds[key] || null;
 }
 
