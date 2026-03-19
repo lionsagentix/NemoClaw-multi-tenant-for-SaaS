@@ -6,30 +6,44 @@
 const fs = require("fs");
 const path = require("path");
 
-const REGISTRY_FILE = path.join(process.env.HOME || "/tmp", ".nemoclaw", "sandboxes.json");
+const GLOBAL_REGISTRY_FILE = path.join(process.env.HOME || "/tmp", ".nemoclaw", "sandboxes.json");
 
-function load() {
+/**
+ * Resolve the registry file path. If tenantId is provided, uses
+ * ~/.nemoclaw/tenants/{tenantId}/sandboxes.json for tenant isolation.
+ * Falls back to global ~/.nemoclaw/sandboxes.json for single-tenant mode.
+ */
+function registryPath(tenantId) {
+  if (tenantId) {
+    return path.join(process.env.HOME || "/tmp", ".nemoclaw", "tenants", tenantId, "sandboxes.json");
+  }
+  return GLOBAL_REGISTRY_FILE;
+}
+
+function load(tenantId) {
+  const filePath = registryPath(tenantId);
   try {
-    if (fs.existsSync(REGISTRY_FILE)) {
-      return JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf-8"));
     }
   } catch {}
   return { sandboxes: {}, defaultSandbox: null };
 }
 
-function save(data) {
-  const dir = path.dirname(REGISTRY_FILE);
+function save(data, tenantId) {
+  const filePath = registryPath(tenantId);
+  const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
-function getSandbox(name) {
-  const data = load();
+function getSandbox(name, tenantId) {
+  const data = load(tenantId);
   return data.sandboxes[name] || null;
 }
 
-function getDefault() {
-  const data = load();
+function getDefault(tenantId) {
+  const data = load(tenantId);
   if (data.defaultSandbox && data.sandboxes[data.defaultSandbox]) {
     return data.defaultSandbox;
   }
@@ -38,8 +52,8 @@ function getDefault() {
   return names.length > 0 ? names[0] : null;
 }
 
-function registerSandbox(entry) {
-  const data = load();
+function registerSandbox(entry, tenantId) {
+  const data = load(tenantId);
   data.sandboxes[entry.name] = {
     name: entry.name,
     createdAt: entry.createdAt || new Date().toISOString(),
@@ -52,42 +66,42 @@ function registerSandbox(entry) {
   if (!data.defaultSandbox) {
     data.defaultSandbox = entry.name;
   }
-  save(data);
+  save(data, tenantId);
 }
 
-function updateSandbox(name, updates) {
-  const data = load();
+function updateSandbox(name, updates, tenantId) {
+  const data = load(tenantId);
   if (!data.sandboxes[name]) return false;
   Object.assign(data.sandboxes[name], updates);
-  save(data);
+  save(data, tenantId);
   return true;
 }
 
-function removeSandbox(name) {
-  const data = load();
+function removeSandbox(name, tenantId) {
+  const data = load(tenantId);
   if (!data.sandboxes[name]) return false;
   delete data.sandboxes[name];
   if (data.defaultSandbox === name) {
     const remaining = Object.keys(data.sandboxes);
     data.defaultSandbox = remaining.length > 0 ? remaining[0] : null;
   }
-  save(data);
+  save(data, tenantId);
   return true;
 }
 
-function listSandboxes() {
-  const data = load();
+function listSandboxes(tenantId) {
+  const data = load(tenantId);
   return {
     sandboxes: Object.values(data.sandboxes),
     defaultSandbox: data.defaultSandbox,
   };
 }
 
-function setDefault(name) {
-  const data = load();
+function setDefault(name, tenantId) {
+  const data = load(tenantId);
   if (!data.sandboxes[name]) return false;
   data.defaultSandbox = name;
-  save(data);
+  save(data, tenantId);
   return true;
 }
 

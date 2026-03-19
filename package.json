@@ -19,7 +19,9 @@
     "nemoclaw/openclaw.plugin.json",
     "nemoclaw/package.json",
     "nemoclaw-blueprint/",
+    "control-plane/",
     "scripts/",
+    "deploy/",
     "Dockerfile",
     ".dockerignore"
   ],

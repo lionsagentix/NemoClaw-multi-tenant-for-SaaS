@@ -1,8 +1,11 @@
 node_modules/
 dist/
 !nemoclaw/dist/
+!control-plane/dist/
 .pytest_cache/
 __pycache__/
 *.pyc
 .DS_Store
 docs/_build/
+.env
+.env.local

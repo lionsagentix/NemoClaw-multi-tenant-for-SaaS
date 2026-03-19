@@ -4,7 +4,18 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const STATE_DIR = join(process.env.HOME ?? "/tmp", ".nemoclaw", "state");
+const GLOBAL_STATE_DIR = join(process.env.HOME ?? "/tmp", ".nemoclaw", "state");
+
+/**
+ * Resolve state directory. If tenantId is provided, uses per-tenant state.
+ * Falls back to global state for single-tenant mode.
+ */
+function resolveStateDir(tenantId?: string): string {
+  if (tenantId) {
+    return join(process.env.HOME ?? "/tmp", ".nemoclaw", "tenants", tenantId, "state");
+  }
+  return GLOBAL_STATE_DIR;
+}
 
 export interface NemoClawState {
   lastRunId: string | null;
@@ -17,18 +28,19 @@ export interface NemoClawState {
   updatedAt: string;
 }
 
-let stateDirCreated = false;
+const createdDirs = new Set<string>();
 
-function ensureStateDir(): void {
-  if (stateDirCreated) return;
-  if (!existsSync(STATE_DIR)) {
-    mkdirSync(STATE_DIR, { recursive: true });
+function ensureStateDir(tenantId?: string): void {
+  const dir = resolveStateDir(tenantId);
+  if (createdDirs.has(dir)) return;
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
-  stateDirCreated = true;
+  createdDirs.add(dir);
 }
 
-function statePath(): string {
-  return join(STATE_DIR, "nemoclaw.json");
+function statePath(tenantId?: string): string {
+  return join(resolveStateDir(tenantId), "nemoclaw.json");
 }
 
 function blankState(): NemoClawState {
@@ -44,25 +56,25 @@ function blankState(): NemoClawState {
   };
 }
 
-export function loadState(): NemoClawState {
-  ensureStateDir();
-  const path = statePath();
+export function loadState(tenantId?: string): NemoClawState {
+  ensureStateDir(tenantId);
+  const path = statePath(tenantId);
   if (!existsSync(path)) {
     return blankState();
   }
   return JSON.parse(readFileSync(path, "utf-8")) as NemoClawState;
 }
 
-export function saveState(state: NemoClawState): void {
-  ensureStateDir();
+export function saveState(state: NemoClawState, tenantId?: string): void {
+  ensureStateDir(tenantId);
   state.updatedAt = new Date().toISOString();
   if (!state.createdAt) state.createdAt = state.updatedAt;
-  writeFileSync(statePath(), JSON.stringify(state, null, 2));
+  writeFileSync(statePath(tenantId), JSON.stringify(state, null, 2));
 }
 
-export function clearState(): void {
-  ensureStateDir();
-  const path = statePath();
+export function clearState(tenantId?: string): void {
+  ensureStateDir(tenantId);
+  const path = statePath(tenantId);
   if (existsSync(path)) {
     writeFileSync(path, JSON.stringify(blankState(), null, 2));
   }

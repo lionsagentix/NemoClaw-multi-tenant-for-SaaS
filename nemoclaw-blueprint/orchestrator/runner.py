@@ -161,6 +161,10 @@ def action_apply(
     sandbox_cfg: dict[str, Any] = blueprint.get("components", {}).get("sandbox", {})
 
     sandbox_name: str = sandbox_cfg.get("name", "openclaw")
+    # Multi-tenant: prefix sandbox name with tenant ID if provided.
+    tenant_id = os.environ.get("NEMOCLAW_TENANT_ID")
+    if tenant_id:
+        sandbox_name = f"{tenant_id}--{sandbox_name}"
     sandbox_image: str = sandbox_cfg.get("image", "openclaw")
     forward_ports: list[int] = sandbox_cfg.get("forward_ports", [18789])
 
@@ -323,8 +327,19 @@ def main() -> None:
         default=None,
         help="Override endpoint URL for the selected profile",
     )
+    parser.add_argument(
+        "--tenant-id",
+        dest="tenant_id",
+        default=None,
+        help="Tenant ID for multi-tenant sandbox naming and state isolation",
+    )
 
     args = parser.parse_args()
+
+    # Set tenant context in environment for downstream use.
+    if args.tenant_id:
+        os.environ["NEMOCLAW_TENANT_ID"] = args.tenant_id
+
     blueprint = load_blueprint()
 
     if args.action == "plan":

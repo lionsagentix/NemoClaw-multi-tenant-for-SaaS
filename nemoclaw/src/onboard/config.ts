@@ -4,7 +4,18 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-const CONFIG_DIR = join(process.env.HOME ?? "/tmp", ".nemoclaw");
+const GLOBAL_CONFIG_DIR = join(process.env.HOME ?? "/tmp", ".nemoclaw");
+
+/**
+ * Resolve config directory. If tenantId is provided, uses per-tenant config.
+ * Falls back to global config for single-tenant mode.
+ */
+function resolveConfigDir(tenantId?: string): string {
+  if (tenantId) {
+    return join(process.env.HOME ?? "/tmp", ".nemoclaw", "tenants", tenantId);
+  }
+  return GLOBAL_CONFIG_DIR;
+}
 
 export type EndpointType = "build" | "ncp" | "nim-local" | "vllm" | "ollama" | "custom";
 
@@ -51,36 +62,37 @@ export function describeOnboardProvider(config: NemoClawOnboardConfig): string {
   }
 }
 
-let configDirCreated = false;
+const createdConfigDirs = new Set<string>();
 
-function ensureConfigDir(): void {
-  if (configDirCreated) return;
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+function ensureConfigDir(tenantId?: string): void {
+  const dir = resolveConfigDir(tenantId);
+  if (createdConfigDirs.has(dir)) return;
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
-  configDirCreated = true;
+  createdConfigDirs.add(dir);
 }
 
-function configPath(): string {
-  return join(CONFIG_DIR, "config.json");
+function configPath(tenantId?: string): string {
+  return join(resolveConfigDir(tenantId), "config.json");
 }
 
-export function loadOnboardConfig(): NemoClawOnboardConfig | null {
-  ensureConfigDir();
-  const path = configPath();
+export function loadOnboardConfig(tenantId?: string): NemoClawOnboardConfig | null {
+  ensureConfigDir(tenantId);
+  const path = configPath(tenantId);
   if (!existsSync(path)) {
     return null;
   }
   return JSON.parse(readFileSync(path, "utf-8")) as NemoClawOnboardConfig;
 }
 
-export function saveOnboardConfig(config: NemoClawOnboardConfig): void {
-  ensureConfigDir();
-  writeFileSync(configPath(), JSON.stringify(config, null, 2));
+export function saveOnboardConfig(config: NemoClawOnboardConfig, tenantId?: string): void {
+  ensureConfigDir(tenantId);
+  writeFileSync(configPath(tenantId), JSON.stringify(config, null, 2));
 }
 
-export function clearOnboardConfig(): void {
-  const path = configPath();
+export function clearOnboardConfig(tenantId?: string): void {
+  const path = configPath(tenantId);
   if (existsSync(path)) {
     unlinkSync(path);
   }
